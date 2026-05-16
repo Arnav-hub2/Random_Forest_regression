@@ -3,6 +3,12 @@ import pandas as pd
 import numpy as np
 import pickle
 import os
+from pathlib import Path
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
 
 # Set page configuration
 st.set_page_config(
@@ -11,20 +17,78 @@ st.set_page_config(
     layout="wide"
 )
 
-# Load model and encoders
+BASE_DIR = Path(__file__).resolve().parent
+DATA_PATH = BASE_DIR / 'loan_approval_dataset.csv'
+MODEL_DIR = BASE_DIR / 'models'
+MODEL_PATH = MODEL_DIR / 'rf_model.pkl'
+ENCODER_PATH = MODEL_DIR / 'label_encoders.pkl'
+FEATURES_PATH = MODEL_DIR / 'feature_names.pkl'
+
 @st.cache_resource
-def load_model():
-    """Load the trained model and encoders"""
-    try:
-        with open('models/rf_model.pkl', 'rb') as f:
+def load_or_train_model():
+    """Load saved artifacts, or train them from the bundled dataset if needed."""
+    if MODEL_PATH.exists() and ENCODER_PATH.exists() and FEATURES_PATH.exists():
+        with open(MODEL_PATH, 'rb') as f:
             model = pickle.load(f)
-        with open('models/label_encoders.pkl', 'rb') as f:
+        with open(ENCODER_PATH, 'rb') as f:
             label_encoders = pickle.load(f)
-        with open('models/feature_names.pkl', 'rb') as f:
+        with open(FEATURES_PATH, 'rb') as f:
             feature_names = pickle.load(f)
         return model, label_encoders, feature_names
-    except FileNotFoundError:
-        st.error("Model files not found. Please run pipeline.py first.")
+
+    if not DATA_PATH.exists():
+        st.error(
+            'Model files are missing and the training dataset is not available. '
+            'Make sure loan_approval_dataset.csv is committed to the repository.'
+        )
+        st.stop()
+
+    data = pd.read_csv(DATA_PATH)
+    X = data.drop(' loan_amount', axis=1)
+    y = data[' loan_amount']
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+
+    categorical_cols = X_train.select_dtypes(include=['object']).columns.tolist()
+    label_encoders = {}
+
+    for col in categorical_cols:
+        encoder = LabelEncoder()
+        X_train[col] = encoder.fit_transform(X_train[col])
+        X_test[col] = encoder.transform(X_test[col])
+        label_encoders[col] = encoder
+
+    model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    mae = mean_absolute_error(y_test, y_pred)
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+
+    MODEL_DIR.mkdir(exist_ok=True)
+    with open(MODEL_PATH, 'wb') as f:
+        pickle.dump(model, f)
+    with open(ENCODER_PATH, 'wb') as f:
+        pickle.dump(label_encoders, f)
+    with open(FEATURES_PATH, 'wb') as f:
+        pickle.dump(X.columns.tolist(), f)
+
+    st.info(
+        f'Model trained automatically because saved artifacts were missing. '
+        f'R² score: {r2:.4f}, MAE: {mae:,.2f}'
+    )
+    return model, label_encoders, X.columns.tolist()
+
+
+def load_model():
+    """Compatibility wrapper for the rest of the app."""
+    try:
+        return load_or_train_model()
+    except Exception as exc:
+        st.error(f'Unable to load or train the model: {exc}')
         st.stop()
 
 # Main app
